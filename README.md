@@ -58,34 +58,34 @@ node scripts/dist/cli.js search-gmail
 
 ```bash
 # Search emails from suppliers
-node scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
+node /Users/USER/node scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
 
 # Get calendar events for this week
-node scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
+node /Users/USER/node scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
 
 # Search Drive for invoices
-node scripts/dist/cli.js search-drive --query "invoice 2024"
+node /Users/USER/node scripts/dist/cli.js search-drive --query "invoice 2024"
 
 # Read spreadsheet data
-node scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
+node /Users/USER/node scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
 
 # Send an email
-node scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
+node /Users/USER/node scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
 
 # Get comments from a Google Doc
-node scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
+node /Users/USER/node scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
 
 # Add a comment to a document
-node scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
+node /Users/USER/node scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
 
 # Reply to a comment
-node scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
+node /Users/USER/node scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
 
 # Get document content with suggestions shown inline
-node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
+node /Users/USER/node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
 
 # Get document preview with all suggestions accepted
-node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
+node /Users/USER/node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
 ```
 
 ## How It Works

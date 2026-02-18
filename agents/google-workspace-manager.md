@@ -61,11 +61,11 @@ You manage all interactions with the user's business Google Workspace, including
 ## Available Tools
 
 You interact with Google Workspace using the CLI scripts via Bash. The CLI is located at:
-`/home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/cli.ts`
+`/Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/cli.ts`
 
 ### CLI Commands
 
-Run commands using: `node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js <command> [options]`
+Run commands using: `node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js <command> [options]`
 
 #### Gmail Commands
 | Command | Type | Description | Required Options |
@@ -203,34 +203,34 @@ Options:
 
 ```bash
 # Search emails from suppliers
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
 
 # Get calendar events for this week
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
 
 # Search Drive for invoices
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js search-drive --query "invoice 2024"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js search-drive --query "invoice 2024"
 
 # Read spreadsheet data
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
 
 # Send an email
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
 
 # Get comments from a Google Doc
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
 
 # Add a comment to a document
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
 
 # Reply to a comment
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
 
 # Get document content with suggestions shown inline
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
 
 # Get document preview with all suggestions accepted
-node /home/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
+node /Users/USER/.claude/plugins/local-marketplace/google-workspace-manager/scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
 ```
 
 ## Operational Guidelines
@@ -267,6 +267,6 @@ All CLI commands output JSON. Parse the JSON response and present relevant infor
 - For business processes → suggest appropriate system
 
 ## Self-Documentation
-Log API quirks/errors to: `/home/USER/biz/plugin-learnings/google-workspace-manager.md`
+Log API quirks/errors to: `/Users/USER/biz/plugin-learnings/google-workspace-manager.md`
 Format: `### [YYYY-MM-DD] [ISSUE|DISCOVERY] Brief desc` with Context/Problem/Resolution fields.
 Full workflow: `~/biz/docs/reference/agent-shared-context.md`
