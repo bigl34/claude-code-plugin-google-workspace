@@ -302,12 +302,13 @@ export class GoogleWorkspaceMCPClient {
   }
 
   /** Creates a calendar event. @invalidates calendar_events/* */
-  async createEvent(summary: string, start: string, end: string, options?: { description?: string; location?: string; attendees?: string; timezone?: string }): Promise<any> {
+  async createEvent(summary: string, start: string, end: string, options?: { description?: string; location?: string; attendees?: string; timezone?: string; calendarId?: string }): Promise<any> {
     const args: Record<string, any> = { summary, start_time: start, end_time: end };
     if (options?.description) args.description = options.description;
     if (options?.location) args.location = options.location;
     if (options?.attendees) args.attendees = options.attendees;
     if (options?.timezone) args.timezone = options.timezone;
+    if (options?.calendarId) args.calendar_id = options.calendarId;
     const result = await this.callTool("create_event", args);
     cache.invalidatePattern(/^calendar_events/);
     return result;
@@ -712,6 +713,448 @@ export class GoogleWorkspaceMCPClient {
   async resolveSpreadsheetComment(spreadsheetId: string, commentId: string): Promise<any> {
     const result = await this.callTool("resolve_spreadsheet_comment", { spreadsheet_id: spreadsheetId, comment_id: commentId });
     cache.invalidate(createCacheKey("sheet_comments", { id: spreadsheetId }));
+    return result;
+  }
+
+  // ============================================
+  // GMAIL FILTERS & LABELS OPERATIONS
+  // ============================================
+
+  /** Lists all Gmail filters. @cached TTL: 1 hour */
+  async listGmailFilters(): Promise<any> {
+    return cache.getOrFetch(
+      "gmail_filters",
+      () => this.callTool("list_gmail_filters", {}),
+      { ttl: TTL.HOUR, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Manages Gmail filters (create/delete). @invalidates gmail_filters */
+  async manageGmailFilter(
+    action: "create" | "delete",
+    options: { criteria?: Record<string, any>; filterAction?: Record<string, any>; filterId?: string }
+  ): Promise<any> {
+    const args: Record<string, any> = { action };
+    if (options.criteria) args.criteria = options.criteria;
+    if (options.filterAction) args.filter_action = options.filterAction;
+    if (options.filterId) args.filter_id = options.filterId;
+    const result = await this.callTool("manage_gmail_filter", args);
+    cache.invalidate("gmail_filters");
+    return result;
+  }
+
+  /** Manages Gmail labels (create/update/delete). @invalidates gmail_labels */
+  async manageGmailLabel(
+    action: "create" | "update" | "delete",
+    options: { name?: string; labelId?: string; labelListVisibility?: string; messageListVisibility?: string }
+  ): Promise<any> {
+    const args: Record<string, any> = { action };
+    if (options.name) args.name = options.name;
+    if (options.labelId) args.label_id = options.labelId;
+    if (options.labelListVisibility) args.label_list_visibility = options.labelListVisibility;
+    if (options.messageListVisibility) args.message_list_visibility = options.messageListVisibility;
+    const result = await this.callTool("manage_gmail_label", args);
+    cache.invalidate("gmail_labels");
+    return result;
+  }
+
+  /** Modifies labels on a Gmail message. @invalidates gmail_search/* */
+  async modifyGmailMessageLabels(
+    messageId: string,
+    addLabelIds?: string[],
+    removeLabelIds?: string[]
+  ): Promise<any> {
+    const args: Record<string, any> = { message_id: messageId };
+    if (addLabelIds) args.add_label_ids = addLabelIds;
+    if (removeLabelIds) args.remove_label_ids = removeLabelIds;
+    const result = await this.callTool("modify_gmail_message_labels", args);
+    cache.invalidatePattern(/^gmail_search/);
+    return result;
+  }
+
+  /** Gets content of multiple Gmail messages in batch (max 25). @cached TTL: 5 minutes */
+  async getGmailMessagesBatch(messageIds: string[], format: "full" | "metadata" = "full"): Promise<any> {
+    const cacheKey = createCacheKey("gmail_batch", { ids: messageIds.join(","), format });
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_gmail_messages_content_batch", { message_ids: messageIds, format }),
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // CONTACTS OPERATIONS
+  // ============================================
+
+  /** Lists contacts. @cached TTL: 15 minutes */
+  async listContacts(pageSize?: number, sortOrder?: string, pageToken?: string): Promise<any> {
+    const cacheKey = createCacheKey("contacts_list", { pageSize, sortOrder, pageToken });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = {};
+        if (pageSize) args.page_size = pageSize;
+        if (sortOrder) args.sort_order = sortOrder;
+        if (pageToken) args.page_token = pageToken;
+        return this.callTool("list_contacts", args);
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Gets a specific contact's details. @cached TTL: 15 minutes */
+  async getContact(contactId: string): Promise<any> {
+    const cacheKey = createCacheKey("contact", { id: contactId });
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_contact", { contact_id: contactId }),
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Searches contacts. @cached TTL: 5 minutes */
+  async searchContacts(query: string, pageSize?: number): Promise<any> {
+    const cacheKey = createCacheKey("contacts_search", { query, pageSize });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = { query };
+        if (pageSize) args.page_size = pageSize;
+        return this.callTool("search_contacts", args);
+      },
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Manages contacts (create/update/delete). @invalidates contacts_* */
+  async manageContact(
+    action: "create" | "update" | "delete",
+    options: {
+      contactId?: string; givenName?: string; familyName?: string;
+      email?: string; phone?: string; organization?: string;
+      jobTitle?: string; notes?: string;
+    }
+  ): Promise<any> {
+    const args: Record<string, any> = { action };
+    if (options.contactId) args.contact_id = options.contactId;
+    if (options.givenName) args.given_name = options.givenName;
+    if (options.familyName) args.family_name = options.familyName;
+    if (options.email) args.email = options.email;
+    if (options.phone) args.phone = options.phone;
+    if (options.organization) args.organization = options.organization;
+    if (options.jobTitle) args.job_title = options.jobTitle;
+    if (options.notes) args.notes = options.notes;
+    const result = await this.callTool("manage_contact", args);
+    cache.invalidatePattern(/^contacts_/);
+    cache.invalidatePattern(/^contact:/);
+    return result;
+  }
+
+  /** Lists contact groups/labels. @cached TTL: 15 minutes */
+  async listContactGroups(pageSize?: number): Promise<any> {
+    const cacheKey = createCacheKey("contact_groups", { pageSize });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = {};
+        if (pageSize) args.page_size = pageSize;
+        return this.callTool("list_contact_groups", args);
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // CHAT OPERATIONS
+  // ============================================
+
+  /** Lists Chat spaces. @cached TTL: 15 minutes */
+  async listChatSpaces(spaceType?: string, pageSize?: number): Promise<any> {
+    const cacheKey = createCacheKey("chat_spaces", { spaceType, pageSize });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = {};
+        if (spaceType) args.space_type = spaceType;
+        if (pageSize) args.page_size = pageSize;
+        return this.callTool("list_spaces", args);
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Gets messages from a Chat space. @cached TTL: 5 minutes */
+  async getChatMessages(spaceId: string, pageSize?: number, orderBy?: string): Promise<any> {
+    const cacheKey = createCacheKey("chat_messages", { spaceId, pageSize, orderBy });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = { space_id: spaceId };
+        if (pageSize) args.page_size = pageSize;
+        if (orderBy) args.order_by = orderBy;
+        return this.callTool("get_messages", args);
+      },
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Sends a message to a Chat space. @invalidates chat_messages/* */
+  async sendChatMessage(spaceId: string, text: string, threadName?: string, threadKey?: string): Promise<any> {
+    const args: Record<string, any> = { space_id: spaceId, message_text: text };
+    if (threadName) args.thread_name = threadName;
+    if (threadKey) args.thread_key = threadKey;
+    const result = await this.callTool("send_message", args);
+    cache.invalidatePattern(/^chat_messages/);
+    return result;
+  }
+
+  /** Searches Chat messages. @cached TTL: 5 minutes */
+  async searchChatMessages(query: string, spaceId?: string, pageSize?: number): Promise<any> {
+    const cacheKey = createCacheKey("chat_search", { query, spaceId, pageSize });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = { query };
+        if (spaceId) args.space_id = spaceId;
+        if (pageSize) args.page_size = pageSize;
+        return this.callTool("search_messages", args);
+      },
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // ADVANCED DRIVE OPERATIONS
+  // ============================================
+
+  /** Copies a Drive file. */
+  async copyDriveFile(fileId: string, newName?: string, parentFolderId?: string): Promise<any> {
+    const args: Record<string, any> = { file_id: fileId };
+    if (newName) args.new_name = newName;
+    if (parentFolderId) args.parent_folder_id = parentFolderId;
+    return this.callTool("copy_drive_file", args);
+  }
+
+  /** Creates a Drive folder. */
+  async createDriveFolder(folderName: string, parentFolderId?: string): Promise<any> {
+    const args: Record<string, any> = { folder_name: folderName };
+    if (parentFolderId) args.parent_folder_id = parentFolderId;
+    return this.callTool("create_drive_folder", args);
+  }
+
+  /** Gets a shareable link for a Drive file. @cached TTL: 15 minutes */
+  async getDriveShareLink(fileId: string): Promise<any> {
+    const cacheKey = createCacheKey("drive_share_link", { id: fileId });
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_drive_shareable_link", { file_id: fileId }),
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Manages Drive file access permissions. @invalidates drive_* for this file */
+  async manageDriveAccess(
+    fileId: string,
+    action: "grant" | "grant_batch" | "update" | "revoke" | "transfer_owner",
+    options: {
+      shareWith?: string; role?: string; shareType?: string;
+      permissionId?: string; recipients?: any[];
+      sendNotification?: boolean; emailMessage?: string;
+      expirationTime?: string; newOwnerEmail?: string;
+    } = {}
+  ): Promise<any> {
+    const args: Record<string, any> = { file_id: fileId, action };
+    if (options.shareWith) args.share_with = options.shareWith;
+    if (options.role) args.role = options.role;
+    if (options.shareType) args.share_type = options.shareType;
+    if (options.permissionId) args.permission_id = options.permissionId;
+    if (options.recipients) args.recipients = options.recipients;
+    if (options.sendNotification !== undefined) args.send_notification = options.sendNotification;
+    if (options.emailMessage) args.email_message = options.emailMessage;
+    if (options.expirationTime) args.expiration_time = options.expirationTime;
+    if (options.newOwnerEmail) args.new_owner_email = options.newOwnerEmail;
+    const result = await this.callTool("manage_drive_access", args);
+    cache.invalidatePattern(/^drive_/);
+    return result;
+  }
+
+  /** Gets Drive file permissions/metadata. @cached TTL: 15 minutes */
+  async getDriveFilePermissions(fileId: string): Promise<any> {
+    const cacheKey = createCacheKey("drive_permissions", { id: fileId });
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_drive_file_permissions", { file_id: fileId }),
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // ADVANCED CALENDAR OPERATIONS
+  // ============================================
+
+  /** Manages calendar events (create/update/delete). @invalidates calendar_events/* */
+  async manageEvent(
+    action: "create" | "update" | "delete",
+    options: {
+      summary?: string; startTime?: string; endTime?: string;
+      eventId?: string; calendarId?: string; description?: string;
+      location?: string; attendees?: any; timezone?: string;
+      addGoogleMeet?: boolean; transparency?: string; visibility?: string;
+    } = {}
+  ): Promise<any> {
+    const args: Record<string, any> = { action };
+    if (options.summary) args.summary = options.summary;
+    if (options.startTime) args.start_time = options.startTime;
+    if (options.endTime) args.end_time = options.endTime;
+    if (options.eventId) args.event_id = options.eventId;
+    if (options.calendarId) args.calendar_id = options.calendarId;
+    if (options.description) args.description = options.description;
+    if (options.location) args.location = options.location;
+    if (options.attendees) args.attendees = options.attendees;
+    if (options.timezone) args.timezone = options.timezone;
+    if (options.addGoogleMeet !== undefined) args.add_google_meet = options.addGoogleMeet;
+    if (options.transparency) args.transparency = options.transparency;
+    if (options.visibility) args.visibility = options.visibility;
+    const result = await this.callTool("manage_event", args);
+    cache.invalidatePattern(/^calendar_events/);
+    return result;
+  }
+
+  /** Queries free/busy info for calendars. @cached TTL: 5 minutes */
+  async queryFreebusy(timeMin: string, timeMax: string, calendarIds?: string[]): Promise<any> {
+    const cacheKey = createCacheKey("freebusy", { timeMin, timeMax, cals: calendarIds?.join(",") });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = { time_min: timeMin, time_max: timeMax };
+        if (calendarIds) args.calendar_ids = calendarIds;
+        return this.callTool("query_freebusy", args);
+      },
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // ADVANCED DOCS OPERATIONS
+  // ============================================
+
+  /** Exports a Google Doc to PDF. */
+  async exportDocToPdf(documentId: string, pdfFilename?: string, folderId?: string): Promise<any> {
+    const args: Record<string, any> = { document_id: documentId };
+    if (pdfFilename) args.pdf_filename = pdfFilename;
+    if (folderId) args.folder_id = folderId;
+    return this.callTool("export_doc_to_pdf", args);
+  }
+
+  /** Gets a Google Doc as clean Markdown. @cached TTL: 15 minutes */
+  async getDocAsMarkdown(
+    documentId: string,
+    options: { includeComments?: boolean; commentMode?: string; includeResolved?: boolean } = {}
+  ): Promise<any> {
+    const cacheKey = createCacheKey("doc_markdown", { id: documentId, ...options });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = { document_id: documentId };
+        if (options.includeComments !== undefined) args.include_comments = options.includeComments;
+        if (options.commentMode) args.comment_mode = options.commentMode;
+        if (options.includeResolved !== undefined) args.include_resolved = options.includeResolved;
+        return this.callTool("get_doc_as_markdown", args);
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Lists Google Docs in a folder. @cached TTL: 15 minutes */
+  async listDocsInFolder(folderId?: string, pageSize?: number): Promise<any> {
+    const cacheKey = createCacheKey("docs_in_folder", { folder: folderId || "root", pageSize });
+    return cache.getOrFetch(
+      cacheKey,
+      async () => {
+        const args: Record<string, any> = {};
+        if (folderId) args.folder_id = folderId;
+        if (pageSize) args.page_size = pageSize;
+        return this.callTool("list_docs_in_folder", args);
+      },
+      { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  // ============================================
+  // ADVANCED SHEETS OPERATIONS
+  // ============================================
+
+  /** Formats a sheet range (colors, fonts, alignment, etc.). */
+  async formatSheetRange(
+    spreadsheetId: string,
+    rangeName: string,
+    options: {
+      backgroundColor?: string; textColor?: string;
+      numberFormatType?: string; numberFormatPattern?: string;
+      wrapStrategy?: string; horizontalAlignment?: string;
+      verticalAlignment?: string; bold?: boolean;
+      italic?: boolean; fontSize?: number;
+    }
+  ): Promise<any> {
+    const args: Record<string, any> = { spreadsheet_id: spreadsheetId, range_name: rangeName };
+    if (options.backgroundColor) args.background_color = options.backgroundColor;
+    if (options.textColor) args.text_color = options.textColor;
+    if (options.numberFormatType) args.number_format_type = options.numberFormatType;
+    if (options.numberFormatPattern) args.number_format_pattern = options.numberFormatPattern;
+    if (options.wrapStrategy) args.wrap_strategy = options.wrapStrategy;
+    if (options.horizontalAlignment) args.horizontal_alignment = options.horizontalAlignment;
+    if (options.verticalAlignment) args.vertical_alignment = options.verticalAlignment;
+    if (options.bold !== undefined) args.bold = options.bold;
+    if (options.italic !== undefined) args.italic = options.italic;
+    if (options.fontSize) args.font_size = options.fontSize;
+    const result = await this.callTool("format_sheet_range", args);
+    cache.invalidatePattern(new RegExp(`^sheet_values:.*${spreadsheetId}`));
+    return result;
+  }
+
+  /** Creates a new sheet tab in an existing spreadsheet. */
+  async createSheet(spreadsheetId: string, sheetName: string): Promise<any> {
+    const result = await this.callTool("create_sheet", { spreadsheet_id: spreadsheetId, sheet_name: sheetName });
+    cache.invalidate(createCacheKey("spreadsheet_info", { id: spreadsheetId }));
+    return result;
+  }
+
+  // ============================================
+  // ADVANCED TASKS OPERATIONS
+  // ============================================
+
+  /** Gets a specific task. @cached TTL: 5 minutes */
+  async getTask(taskListId: string, taskId: string): Promise<any> {
+    const cacheKey = createCacheKey("task", { listId: taskListId, id: taskId });
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_task", { task_list_id: taskListId, task_id: taskId }),
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
+
+  /** Manages tasks (create/update/delete/move). @invalidates tasks/* */
+  async manageTask(
+    action: "create" | "update" | "delete" | "move",
+    taskListId: string,
+    options: {
+      taskId?: string; title?: string; notes?: string;
+      status?: string; due?: string; parent?: string;
+      previous?: string; destinationTaskList?: string;
+    } = {}
+  ): Promise<any> {
+    const args: Record<string, any> = { action, task_list_id: taskListId };
+    if (options.taskId) args.task_id = options.taskId;
+    if (options.title) args.title = options.title;
+    if (options.notes) args.notes = options.notes;
+    if (options.status) args.status = options.status;
+    if (options.due) args.due = options.due;
+    if (options.parent) args.parent = options.parent;
+    if (options.previous) args.previous = options.previous;
+    if (options.destinationTaskList) args.destination_task_list = options.destinationTaskList;
+    const result = await this.callTool("manage_task", args);
+    cache.invalidatePattern(/^tasks:/);
+    cache.invalidatePattern(/^task:/);
     return result;
   }
 
