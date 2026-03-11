@@ -29,7 +29,7 @@ Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/claude-code-plugin-google-workspace.git
+git clone https://github.com/bigl34/claude-code-plugin-google-workspace.git
 cd claude-code-plugin-google-workspace
 cp config.template.json config.json  # fill in your credentials
 cd scripts && npm install
@@ -93,7 +93,7 @@ node scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
 node scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
 
 # Get comments from a Google Doc
-node scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
+node scripts/dist/cli.js get-doc-comments --id "documentId"
 
 # Add a comment to a document
 node scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
