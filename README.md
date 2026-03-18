@@ -3,7 +3,7 @@
 
 Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, Chat, Filters, Comments)
 
-![Version](https://img.shields.io/badge/version-1.8.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.10.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -49,14 +49,6 @@ node scripts/dist/cli.js search-gmail
    ```
 4. Ensure the MCP server binary is available on your system (see the service's documentation)
 
-## Configuration
-
-Copy `config.template.json` to `config.json` and fill in the required values:
-
-| Field | Placeholder |
-|-------|-------------|
-| `credentials_path` | `/path/to/your/credentials` |
-
 ## Available Commands
 
 | Command                    | Type     | Description                  | Required Options                           |
@@ -78,34 +70,34 @@ Copy `config.template.json` to `config.json` and fill in the required values:
 
 ```bash
 # Search emails from suppliers
-node scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
+node $HOME/node scripts/dist/cli.js search-gmail --query "from:supplier subject:invoice"
 
 # Get calendar events for this week
-node scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
+node $HOME/node scripts/dist/cli.js get-events --time-min "2024-01-01T00:00:00Z" --time-max "2024-01-07T23:59:59Z"
 
 # Search Drive for invoices
-node scripts/dist/cli.js search-drive --query "invoice 2024"
+node $HOME/node scripts/dist/cli.js search-drive --query "invoice 2024"
 
 # Read spreadsheet data
-node scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
+node $HOME/node scripts/dist/cli.js read-sheet --id "spreadsheetId" --range "Sheet1!A1:D10"
 
 # Send an email
-node scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
+node $HOME/node scripts/dist/cli.js send-gmail --to "customer@example.com" --subject "Order Update" --body "Your order has shipped."
 
 # Get comments from a Google Doc
-node scripts/dist/cli.js get-doc-comments --id "documentId"
+node $HOME/node scripts/dist/cli.js get-doc-comments --id "YOUR_GOOGLE_DOC_ID"
 
 # Add a comment to a document
-node scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
+node $HOME/node scripts/dist/cli.js create-doc-comment --id "documentId" --text "Please review this section"
 
 # Reply to a comment
-node scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
+node $HOME/node scripts/dist/cli.js reply-doc-comment --id "documentId" --comment-id "commentId" --text "Thanks, I've updated it"
 
 # Get document content with suggestions shown inline
-node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
+node $HOME/node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "SUGGESTIONS_INLINE"
 
 # Get document preview with all suggestions accepted
-node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
+node $HOME/node scripts/dist/cli.js get-doc-content --id "documentId" --suggestions-mode "PREVIEW_SUGGESTIONS_ACCEPTED"
 ```
 
 ## How It Works
