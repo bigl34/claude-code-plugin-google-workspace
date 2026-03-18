@@ -257,8 +257,10 @@ export class GoogleWorkspaceMCPClient {
   }
 
   /** Creates a Gmail draft. */
-  async createGmailDraft(to: string, subject: string, body: string): Promise<any> {
-    return this.callTool("draft_gmail_message", { to, subject, body });
+  async createGmailDraft(to: string, subject: string, body: string, threadId?: string): Promise<any> {
+    const params: Record<string, string> = { to, subject, body };
+    if (threadId) params.thread_id = threadId;
+    return this.callTool("draft_gmail_message", params);
   }
 
   /** Gets all messages in a Gmail thread. @cached TTL: 15 minutes */
