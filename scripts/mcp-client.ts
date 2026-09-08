@@ -1,41 +1,247 @@
-/**
- * Google Workspace MCP Client
- *
- * Wrapper client for Google Workspace APIs via MCP server.
- * Provides access to Gmail, Calendar, Drive, Docs, Sheets, Tasks, and Comments.
- *
- * Key features:
- * - Gmail: search, read, send, draft
- * - Calendar: events, CRUD operations
- * - Drive: file search, content retrieval
- * - Docs: content, text modification, find/replace
- * - Sheets: read, write, rich text cells with hyperlinks
- * - Tasks: task lists, task management
- * - Comments: read/write/reply/resolve across Docs, Sheets, Slides
- */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { IOType } from "node:child_process";
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { basename, dirname, join } from "path";
+import { loadServiceConfig, z } from "@local/cli-utils";
 import { PluginCache, TTL, createCacheKey } from "@local/plugin-cache";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const GoogleWorkspaceConfigSchema = z.object({
+  mcpServer: z.object({
+    command: z.string().min(1),
+    args: z.array(z.string()),
+    env: z.record(z.string(), z.string()).optional(),
+  }),
+  userEmail: z.string().email().optional(),
+});
 
-interface MCPConfig {
-  mcpServer: {
-    command: string;
-    args: string[];
-    env?: Record<string, string>;
-  };
-  userEmail?: string;
+type MCPConfig = z.infer<typeof GoogleWorkspaceConfigSchema>;
+
+export interface DriveFileRawEnvelope {
+  encoding?: string;
+  data?: string;
+  sizeBytes?: number;
+  fileId?: string;
+  fileName?: string;
+  exportMimeType?: string;
+  sourceMimeType?: string;
 }
 
-/**
- * Rich text segment with optional formatting and hyperlink
- */
+export function sheetValuesCachePattern(spreadsheetId: string): RegExp {
+  const escapedSpreadsheetId = spreadsheetId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^sheet_values\\?(?:[^&]+&)*id=${escapedSpreadsheetId}(?:&|$)`); // nosemgrep: detect-non-literal-regexp
+}
+
+const DEFAULT_LOCAL_MCP_SOURCE = join(
+  homedir(),
+  "repos",
+  "work",
+  "mcp-servers",
+  "google_workspace_mcp",
+);
+
+export function resolveGoogleWorkspaceMcpLaunch(
+  command: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+  pathExists: (path: string) => boolean = existsSync,
+  enforceReadOnlyIndexing: boolean = false,
+): { command: string; args: string[]; cwd?: string } {
+  if (enforceReadOnlyIndexing) {
+    const conflictingFlags = new Set(["--tools", "--tool-tier", "--permissions"]);
+    const conflict = args.find((arg) => conflictingFlags.has(arg.split("=", 1)[0]));
+    if (conflict) {
+      throw new Error(
+        `Read-only indexing refuses conflicting MCP launch flag '${conflict}'`,
+      );
+    }
+  }
+
+  const explicitSource = env.GOOGLE_WORKSPACE_MCP_SOURCE?.trim();
+  const source = explicitSource || DEFAULT_LOCAL_MCP_SOURCE;
+  const localSourceRequired = Boolean(explicitSource) || enforceReadOnlyIndexing;
+
+  if (!pathExists(source)) {
+    if (localSourceRequired) {
+      throw new Error(
+        explicitSource
+          ? `GOOGLE_WORKSPACE_MCP_SOURCE does not exist: ${explicitSource}`
+          : `Read-only indexing requires the canonical local Google Workspace MCP: ${source}`,
+      );
+    }
+    return { command, args: [...args] };
+  }
+
+  const fromIndex = args.findIndex((arg) => arg === "--from");
+  const configuredSource = fromIndex >= 0 ? args[fromIndex + 1] : undefined;
+  if (!configuredSource || !configuredSource.includes("google_workspace_mcp")) {
+    if (localSourceRequired) {
+      throw new Error(
+        "Read-only indexing requires a Google Workspace MCP --from launch source",
+      );
+    }
+    return { command, args: [...args] };
+  }
+
+  const entrypointIndex = args.findIndex((arg) => arg === "workspace-mcp");
+  const commandName = basename(command);
+  if (entrypointIndex < 0 || (commandName !== "uv" && commandName !== "uvx")) {
+    if (localSourceRequired) {
+      throw new Error(
+        "Local Google Workspace MCP requires a uv/uvx launch with the workspace-mcp entrypoint",
+      );
+    }
+    return { command, args: [...args] };
+  }
+
+  const expectedPrefix =
+    commandName === "uvx"
+      ? ["--from", configuredSource]
+      : ["tool", "uvx", "--from", configuredSource];
+  const actualPrefix = args.slice(0, entrypointIndex);
+  if (
+    actualPrefix.length !== expectedPrefix.length ||
+    actualPrefix.some((arg, index) => arg !== expectedPrefix[index])
+  ) {
+    throw new Error(
+      "Google Workspace MCP launch has unsupported uv/uvx arguments before workspace-mcp",
+    );
+  }
+
+  const uvCommand =
+    commandName === "uvx" ? join(dirname(command), "uv") : command;
+  return {
+    command: uvCommand,
+    args: [
+      "run",
+      "--project",
+      source,
+      "workspace-mcp",
+      ...args.slice(entrypointIndex + 1),
+    ],
+    cwd: source,
+  };
+}
+
+const ACCOUNT_OAUTH_ENV_PATTERN =
+  /^GOOGLE_(?:OAUTH_CLIENT_(?:ID|SECRET)|MCP_(?:CREDENTIALS_DIR|ACCOUNT_PROFILE))_[A-Z0-9_]+$/;
+
+interface AccountOAuthEnvironmentOptions {
+  interactiveAuth?: boolean;
+  requireDedicatedIndexingClient?: boolean;
+  forceReadOnlyIndexing?: boolean;
+}
+
+export function resolveAccountOAuthEnvironment(
+  sourceEnv: Record<string, string | undefined>,
+  accountName?: string,
+  options: AccountOAuthEnvironmentOptions = {},
+): Record<string, string | undefined> {
+  const env = { ...sourceEnv };
+  let accountProfile: string | undefined;
+
+  if (accountName) {
+    const suffix = accountName.trim().toUpperCase();
+    if (!/^[A-Z0-9_]+$/.test(suffix)) {
+      throw new Error(
+        `Account name '${accountName}' cannot be used for OAuth client selection`,
+      );
+    }
+
+    const clientIdKey = `GOOGLE_OAUTH_CLIENT_ID_${suffix}`;
+    const clientSecretKey = `GOOGLE_OAUTH_CLIENT_SECRET_${suffix}`;
+    const credentialsDirKey = `GOOGLE_MCP_CREDENTIALS_DIR_${suffix}`;
+    const profileKey = `GOOGLE_MCP_ACCOUNT_PROFILE_${suffix}`;
+    const clientId = env[clientIdKey]?.trim();
+    const clientSecret = env[clientSecretKey]?.trim();
+
+    if (Boolean(clientId) !== Boolean(clientSecret)) {
+      throw new Error(
+        `Account '${accountName}' requires both ${clientIdKey} and ${clientSecretKey}`,
+      );
+    }
+    if (options.requireDedicatedIndexingClient && (!clientId || !clientSecret)) {
+      throw new Error(
+        `Account '${accountName}' requires a dedicated OAuth client for this operation`,
+      );
+    }
+    if (
+      options.requireDedicatedIndexingClient &&
+      clientId === env.GOOGLE_OAUTH_CLIENT_ID?.trim()
+    ) {
+      throw new Error(
+        `Account '${accountName}' dedicated OAuth client must differ from the shared client`,
+      );
+    }
+
+    if (clientId && clientSecret) {
+      env.GOOGLE_OAUTH_CLIENT_ID = clientId;
+      env.GOOGLE_OAUTH_CLIENT_SECRET = clientSecret;
+    }
+
+    const credentialsDir = env[credentialsDirKey]?.trim();
+    if (options.requireDedicatedIndexingClient && !credentialsDir) {
+      throw new Error(
+        `Account '${accountName}' requires an isolated credential directory for this operation`,
+      );
+    }
+    if (options.requireDedicatedIndexingClient && credentialsDir) {
+      const genericCredentialDirs = new Set(
+        [
+          env.WORKSPACE_MCP_CREDENTIALS_DIR?.trim(),
+          env.GOOGLE_MCP_CREDENTIALS_DIR?.trim(),
+          env.GOOGLE_OAUTH_TOKEN?.trim()
+            ? dirname(env.GOOGLE_OAUTH_TOKEN.trim())
+            : undefined,
+        ].filter((value): value is string => Boolean(value)),
+      );
+      if (genericCredentialDirs.has(credentialsDir)) {
+        throw new Error(
+          `Account '${accountName}' credential directory must differ from the shared directory`,
+        );
+      }
+    }
+    if (credentialsDir) {
+      env.GOOGLE_MCP_CREDENTIALS_DIR = credentialsDir;
+      env.WORKSPACE_MCP_CREDENTIALS_DIR = credentialsDir;
+    }
+
+    accountProfile = env[profileKey]?.trim().toLowerCase();
+    if (accountProfile && accountProfile !== "indexing_readonly") {
+      throw new Error(
+        `Account '${accountName}' has unsupported OAuth profile '${accountProfile}'`,
+      );
+    }
+    if (options.requireDedicatedIndexingClient && accountProfile !== "indexing_readonly") {
+      throw new Error(
+        `Account '${accountName}' requires the indexing_readonly OAuth profile for this operation`,
+      );
+    }
+  }
+
+  if (accountProfile === "indexing_readonly" || options.forceReadOnlyIndexing) {
+    env.WORKSPACE_MCP_TOOLS = "gmail,drive,docs,sheets";
+    env.WORKSPACE_MCP_READ_ONLY = "true";
+    env.WORKSPACE_MCP_NONINTERACTIVE =
+      accountProfile === "indexing_readonly" && options.interactiveAuth ? "0" : "1";
+    delete env.WORKSPACE_MCP_PERMISSIONS;
+    delete env.WORKSPACE_MCP_TOOL_TIER;
+  }
+
+  delete env.WORKSPACE_MCP_INDEXING_PROFILE;
+
+  for (const key of Object.keys(env)) {
+    if (ACCOUNT_OAUTH_ENV_PATTERN.test(key)) {
+      delete env[key];
+    }
+  }
+
+  return env;
+}
+
 export interface RichTextSegment {
   text: string;
   url?: string;
@@ -45,22 +251,24 @@ export interface RichTextSegment {
   sproductthrough?: boolean;
   fontSize?: number;
   fontFamily?: string;
-  foregroundColor?: string;  // Hex color, e.g., "#FF0000"
+  foregroundColor?: string;
 }
 
-/**
- * Cell definition for batch rich text writing
- */
 export interface RichTextCellDef {
-  cell: string;  // A1 notation, e.g., "AD2" or "Sheet1!B5"
+  cell: string;
   segments: RichTextSegment[];
 }
 
-// Initialize cache with namespace
 const cache = new PluginCache({
   namespace: "google-workspace-manager",
   defaultTTL: TTL.FIVE_MINUTES,
 });
+
+const GOOGLE_WORKSPACE_MCP_REQUEST_OPTIONS: RequestOptions = {
+  timeout: 300_000,
+  resetTimeoutOnProgress: true,
+  maxTotalTimeout: 300_000,
+};
 
 export class GoogleWorkspaceMCPClient {
   private client: Client | null = null;
@@ -68,58 +276,94 @@ export class GoogleWorkspaceMCPClient {
   private config: MCPConfig;
   private connected: boolean = false;
   private cacheDisabled: boolean = false;
+  private accountName?: string;
+  private interactiveAuth: boolean = false;
+  private requireDedicatedIndexingClient: boolean = false;
+  private stderr: IOType;
 
-  constructor() {
-    // When compiled, __dirname is dist/, so look in parent for config.json
-    const configPath = join(__dirname, "..", "config.json");
-    this.config = JSON.parse(readFileSync(configPath, "utf-8"));
+  constructor(opts?: { config?: MCPConfig; stderr?: IOType }) {
+    this.config =
+      opts?.config ??
+      loadServiceConfig("google-workspace-manager", {
+        schema: GoogleWorkspaceConfigSchema,
+      });
+    this.stderr = opts?.stderr ?? "inherit";
   }
 
-  // ============================================
-  // CACHE CONTROL
-  // ============================================
 
-  /** Disables caching for all subsequent requests. */
   disableCache(): void {
     this.cacheDisabled = true;
     cache.disable();
   }
 
-  /** Re-enables caching after it was disabled. */
   enableCache(): void {
     this.cacheDisabled = false;
     cache.enable();
   }
 
-  /** Returns cache statistics including hit/miss counts. */
   getCacheStats() {
     return cache.getStats();
   }
 
-  /** Clears all cached data. @returns Number of cache entries cleared */
   clearCache(): number {
     return cache.clear();
   }
 
-  /** Invalidates a specific cache entry by key. */
   invalidateCacheKey(key: string): boolean {
     return cache.invalidate(key);
   }
 
-  // ============================================
-  // CONNECTION MANAGEMENT
-  // ============================================
 
-  /** Establishes connection to the MCP server. */
+  useAccount(
+    accountName: string,
+    requireDedicatedIndexingClient: boolean = false,
+  ): void {
+    if (this.connected) {
+      throw new Error("OAuth account must be selected before the MCP connection opens");
+    }
+    if (this.accountName && this.accountName !== accountName) {
+      throw new Error(
+        `OAuth account already selected as '${this.accountName}'`,
+      );
+    }
+    this.accountName = accountName;
+    this.requireDedicatedIndexingClient ||= requireDedicatedIndexingClient;
+  }
+
+  useInteractiveAuth(requireDedicatedIndexingClient: boolean = false): void {
+    if (this.connected) {
+      throw new Error("Interactive auth must be selected before the MCP connection opens");
+    }
+    this.interactiveAuth = true;
+    this.requireDedicatedIndexingClient ||= requireDedicatedIndexingClient;
+  }
+
   async connect(): Promise<void> {
     if (this.connected) return;
 
-    const env = {
-      ...process.env,
-      ...this.config.mcpServer.env,
+    const mergedEnv = {
+        ...process.env,
+        ...this.config.mcpServer.env,
     };
+    const accountSuffix = this.accountName?.trim().toUpperCase();
+    const selectedAccountProfile = accountSuffix
+      ? mergedEnv[`GOOGLE_MCP_ACCOUNT_PROFILE_${accountSuffix}`]?.trim().toLowerCase()
+      : undefined;
+    const forceReadOnlyIndexing =
+      process.env.WORKSPACE_MCP_INDEXING_PROFILE === "readonly";
+    const enforceReadOnlyIndexing =
+      forceReadOnlyIndexing || selectedAccountProfile === "indexing_readonly";
 
-    // Ensure required env vars are set for workspace-mcp
+    const env = resolveAccountOAuthEnvironment(
+      mergedEnv,
+      this.accountName,
+      {
+        interactiveAuth: this.interactiveAuth,
+        requireDedicatedIndexingClient: this.requireDedicatedIndexingClient,
+        forceReadOnlyIndexing,
+      },
+    );
+
     if (!env.GOOGLE_OAUTH_CLIENT_ID) {
       throw new Error(
         "GOOGLE_OAUTH_CLIENT_ID environment variable is not set."
@@ -130,7 +374,6 @@ export class GoogleWorkspaceMCPClient {
         "GOOGLE_OAUTH_CLIENT_SECRET environment variable is not set."
       );
     }
-    // Derive GOOGLE_MCP_CREDENTIALS_DIR from GOOGLE_OAUTH_TOKEN if not set
     if (!env.GOOGLE_MCP_CREDENTIALS_DIR && env.GOOGLE_OAUTH_TOKEN) {
       env.GOOGLE_MCP_CREDENTIALS_DIR = dirname(env.GOOGLE_OAUTH_TOKEN);
     }
@@ -140,10 +383,20 @@ export class GoogleWorkspaceMCPClient {
       );
     }
 
+    const launch = resolveGoogleWorkspaceMcpLaunch(
+      this.config.mcpServer.command,
+      this.config.mcpServer.args,
+      env,
+      existsSync,
+      enforceReadOnlyIndexing,
+    );
+
     this.transport = new StdioClientTransport({
-      command: this.config.mcpServer.command,
-      args: this.config.mcpServer.args,
+      command: launch.command,
+      args: launch.args,
+      cwd: launch.cwd,
       env: env as Record<string, string>,
+      stderr: this.stderr,
     });
 
     this.client = new Client(
@@ -151,11 +404,10 @@ export class GoogleWorkspaceMCPClient {
       { capabilities: {} }
     );
 
-    await this.client.connect(this.transport);
+    await this.client.connect(this.transport, GOOGLE_WORKSPACE_MCP_REQUEST_OPTIONS);
     this.connected = true;
   }
 
-  /** Disconnects from the MCP server. */
   async disconnect(): Promise<void> {
     if (this.client && this.connected) {
       await this.client.close();
@@ -163,27 +415,25 @@ export class GoogleWorkspaceMCPClient {
     }
   }
 
-  // ============================================
-  // MCP TOOLS
-  // ============================================
 
-  /** Lists available MCP tools. @returns Array of tool definitions */
   async listTools(): Promise<any[]> {
     await this.connect();
-    const result = await this.client!.listTools();
+    const result = await this.client!.listTools(undefined, GOOGLE_WORKSPACE_MCP_REQUEST_OPTIONS);
     return result.tools;
   }
 
-  /** Calls an MCP tool with arguments. Automatically injects user email if configured. */
   async callTool(name: string, args: Record<string, any> = {}): Promise<any> {
     await this.connect();
 
-    // Add user email if configured
     if (this.config.userEmail && !args.user_google_email) {
       args.user_google_email = this.config.userEmail;
     }
 
-    const result = await this.client!.callTool({ name, arguments: args });
+    const result = await this.client!.callTool(
+      { name, arguments: args },
+      undefined,
+      GOOGLE_WORKSPACE_MCP_REQUEST_OPTIONS
+    );
     const content = result.content as Array<{ type: string; text?: string }>;
 
     if (result.isError) {
@@ -203,41 +453,45 @@ export class GoogleWorkspaceMCPClient {
     return content;
   }
 
-  // ============================================
-  // GMAIL OPERATIONS
-  // ============================================
 
-  /**
-   * Searches Gmail messages.
-   * @param query - Gmail search query (e.g., "from:user@example.com")
-   * @param maxResults - Max messages to return
-   * @returns Search results with message metadata
-   * @cached TTL: 5 minutes
-   */
-  async searchGmailMessages(query: string, maxResults?: number): Promise<any> {
-    const cacheKey = createCacheKey("gmail_search", { query, maxResults });
+  async searchGmailMessages(
+    query: string,
+    maxResults?: number,
+    pageToken?: string,
+    accountEmail?: string,
+  ): Promise<any> {
+    const cacheKey = createCacheKey("gmail_search", {
+      query,
+      maxResults,
+      pageToken,
+      account: accountEmail,
+    });
     return cache.getOrFetch(
       cacheKey,
       async () => {
         const args: Record<string, any> = { query };
-        if (maxResults) args.maxResults = maxResults;
+        if (maxResults) args.page_size = maxResults;
+        if (pageToken) args.page_token = pageToken;
+        if (accountEmail) args.user_google_email = accountEmail;
         return this.callTool("search_gmail_messages", args);
       },
       { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Gets full content of a Gmail message. @cached TTL: 15 minutes */
-  async getGmailMessage(messageId: string): Promise<any> {
-    const cacheKey = createCacheKey("gmail_message", { id: messageId });
+  async getGmailMessage(messageId: string, userEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("gmail_message", { id: messageId, account: userEmail });
     return cache.getOrFetch(
       cacheKey,
-      () => this.callTool("get_gmail_message_content", { message_id: messageId }),
+      () => {
+        const args: Record<string, any> = { message_id: messageId };
+        if (userEmail) args.user_google_email = userEmail;
+        return this.callTool("get_gmail_message_content", args);
+      },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Lists all Gmail labels. @cached TTL: 1 hour */
   async listGmailLabels(): Promise<any> {
     return cache.getOrFetch(
       "gmail_labels",
@@ -246,24 +500,29 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Sends a Gmail message. @invalidates gmail_search/* */
-  async sendGmailMessage(to: string, subject: string, body: string, cc?: string, bcc?: string): Promise<any> {
+  async sendGmailMessage(
+    to: string,
+    subject: string,
+    body: string,
+    cc?: string,
+    bcc?: string,
+    accountEmail?: string
+  ): Promise<any> {
     const args: Record<string, any> = { to, subject, body };
     if (cc) args.cc = cc;
     if (bcc) args.bcc = bcc;
+    if (accountEmail) args.user_google_email = accountEmail;
     const result = await this.callTool("send_gmail_message", args);
     cache.invalidatePattern(/^gmail_search/);
     return result;
   }
 
-  /** Creates a Gmail draft. */
   async createGmailDraft(to: string, subject: string, body: string, threadId?: string): Promise<any> {
     const params: Record<string, string> = { to, subject, body };
     if (threadId) params.thread_id = threadId;
     return this.callTool("draft_gmail_message", params);
   }
 
-  /** Gets all messages in a Gmail thread. @cached TTL: 15 minutes */
   async getGmailThread(threadId: string): Promise<any> {
     const cacheKey = createCacheKey("gmail_thread", { id: threadId });
     return cache.getOrFetch(
@@ -273,11 +532,7 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // CALENDAR OPERATIONS
-  // ============================================
 
-  /** Lists all calendars. @cached TTL: 1 hour */
   async listCalendars(): Promise<any> {
     return cache.getOrFetch(
       "calendars",
@@ -286,14 +541,14 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Gets calendar events with optional date range filtering. @cached TTL: 15 minutes */
-  async getEvents(options?: { calendarId?: string; timeMin?: string; timeMax?: string; maxResults?: number }): Promise<any> {
+  async getEvents(options?: { calendarId?: string; eventId?: string; timeMin?: string; timeMax?: string; maxResults?: number }): Promise<any> {
     const cacheKey = createCacheKey("calendar_events", options || {});
     return cache.getOrFetch(
       cacheKey,
       async () => {
         const args: Record<string, any> = {};
         if (options?.calendarId) args.calendar_id = options.calendarId;
+        if (options?.eventId) args.event_id = options.eventId;
         if (options?.timeMin) args.time_min = options.timeMin;
         if (options?.timeMax) args.time_max = options.timeMax;
         if (options?.maxResults) args.max_results = options.maxResults;
@@ -303,47 +558,41 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Creates a calendar event. @invalidates calendar_events/* */
-  async createEvent(summary: string, start: string, end: string, options?: { description?: string; location?: string; attendees?: string; timezone?: string; calendarId?: string }): Promise<any> {
-    const args: Record<string, any> = { summary, start_time: start, end_time: end };
+  async createEvent(summary: string, start: string, end: string, options?: { description?: string; location?: string; attendees?: string; timezone?: string; calendarId?: string; sendUpdates?: string }): Promise<any> {
+    const args: Record<string, any> = { action: "create", summary, start_time: start, end_time: end };
     if (options?.description) args.description = options.description;
     if (options?.location) args.location = options.location;
-    if (options?.attendees) args.attendees = options.attendees;
+    if (options?.attendees) args.attendees = Array.isArray(options.attendees) ? options.attendees : options.attendees.split(",").map((s: string) => s.trim());
     if (options?.timezone) args.timezone = options.timezone;
     if (options?.calendarId) args.calendar_id = options.calendarId;
-    const result = await this.callTool("create_event", args);
+    if (options?.sendUpdates) args.send_updates = options.sendUpdates;
+    const result = await this.callTool("manage_event", args);
     cache.invalidatePattern(/^calendar_events/);
     return result;
   }
 
-  /** Deletes a calendar event. @invalidates calendar_events/* */
   async deleteEvent(eventId: string, calendarId?: string): Promise<any> {
-    const args: Record<string, any> = { event_id: eventId };
+    const args: Record<string, any> = { action: "delete", event_id: eventId };
     if (calendarId) args.calendar_id = calendarId;
-    const result = await this.callTool("delete_event", args);
+    const result = await this.callTool("manage_event", args);
     cache.invalidatePattern(/^calendar_events/);
     return result;
   }
 
-  // ============================================
-  // DRIVE OPERATIONS
-  // ============================================
 
-  /** Searches Drive files by name/content. @cached TTL: 15 minutes */
   async searchDriveFiles(query: string, maxResults?: number): Promise<any> {
     const cacheKey = createCacheKey("drive_search", { query, maxResults });
     return cache.getOrFetch(
       cacheKey,
       async () => {
         const args: Record<string, any> = { query };
-        if (maxResults) args.maxResults = maxResults;
+        if (maxResults) args.page_size = maxResults;
         return this.callTool("search_drive_files", args);
       },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Gets content of a Drive file. @cached TTL: 5 minutes */
   async getDriveFileContent(fileId: string): Promise<any> {
     const cacheKey = createCacheKey("drive_file", { id: fileId });
     return cache.getOrFetch(
@@ -353,25 +602,31 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Lists items in a Drive folder. @cached TTL: 15 minutes */
+  async getDriveFileRaw(
+    fileId: string,
+    exportFormat?: string,
+    maxBytes?: number,
+  ): Promise<DriveFileRawEnvelope> {
+    const args: Record<string, unknown> = { file_id: fileId, raw_base64: true };
+    if (exportFormat) args.export_format = exportFormat;
+    if (maxBytes) args.max_bytes = maxBytes;
+    return this.callTool("get_drive_file_content", args);
+  }
+
   async listDriveItems(folderId?: string): Promise<any> {
     const cacheKey = createCacheKey("drive_items", { folder: folderId || "root" });
     return cache.getOrFetch(
       cacheKey,
       async () => {
         const args: Record<string, any> = {};
-        if (folderId) args.folderId = folderId;
+        if (folderId) args.folder_id = folderId;
         return this.callTool("list_drive_items", args);
       },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  // ============================================
-  // DOCS OPERATIONS
-  // ============================================
 
-  /** Searches Google Docs. @cached TTL: 15 minutes */
   async searchDocs(query: string): Promise<any> {
     const cacheKey = createCacheKey("docs_search", { query });
     return cache.getOrFetch(
@@ -381,21 +636,20 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Gets Google Doc content with optional suggestions view. @cached TTL: 5 minutes */
-  async getDocContent(documentId: string, suggestionsViewMode?: string): Promise<any> {
-    const cacheKey = createCacheKey("doc_content", { id: documentId, mode: suggestionsViewMode });
+  async getDocContent(documentId: string, suggestionsViewMode?: string, userEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("doc_content", { id: documentId, mode: suggestionsViewMode, account: userEmail });
     return cache.getOrFetch(
       cacheKey,
       () => {
         const args: Record<string, any> = { document_id: documentId };
         if (suggestionsViewMode) args.suggestions_view_mode = suggestionsViewMode;
+        if (userEmail) args.user_google_email = userEmail;
         return this.callTool("get_doc_content", args);
       },
       { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Creates a new Google Doc. @invalidates docs_search/* */
   async createDoc(title: string, content?: string): Promise<any> {
     const args: Record<string, any> = { title };
     if (content) args.content = content;
@@ -404,7 +658,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Modifies text in a Google Doc (insert, replace, or delete). @invalidates doc_content/{documentId} */
   async modifyDocText(
     documentId: string,
     operation: "insert" | "replace" | "delete",
@@ -439,7 +692,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Find and replace text in a Google Doc. @invalidates doc_content/{documentId} */
   async findAndReplaceDoc(
     documentId: string,
     findText: string,
@@ -456,61 +708,242 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  // ============================================
-  // SHEETS OPERATIONS
-  // ============================================
 
-  /** Lists all spreadsheets. @cached TTL: 15 minutes */
-  async listSpreadsheets(): Promise<any> {
+  async listSpreadsheets(accountEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("spreadsheets_list", { account: accountEmail });
     return cache.getOrFetch(
-      "spreadsheets_list",
-      () => this.callTool("list_spreadsheets", {}),
+      cacheKey,
+      () => {
+        const args: Record<string, any> = {};
+        if (accountEmail) args.user_google_email = accountEmail;
+        return this.callTool("list_spreadsheets", args);
+      },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Gets spreadsheet metadata and sheet names. @cached TTL: 15 minutes */
-  async getSpreadsheetInfo(spreadsheetId: string): Promise<any> {
-    const cacheKey = createCacheKey("spreadsheet_info", { id: spreadsheetId });
+  async getSpreadsheetInfo(spreadsheetId: string, accountEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("spreadsheet_info", { id: spreadsheetId, account: accountEmail });
     return cache.getOrFetch(
       cacheKey,
-      () => this.callTool("get_spreadsheet_info", { spreadsheet_id: spreadsheetId }),
+      () => {
+        const args: Record<string, any> = { spreadsheet_id: spreadsheetId };
+        if (accountEmail) args.user_google_email = accountEmail;
+        return this.callTool("get_spreadsheet_info", args);
+      },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Reads values from a spreadsheet range. @cached TTL: 5 minutes */
-  async readSheetValues(spreadsheetId: string, range: string): Promise<any> {
-    const cacheKey = createCacheKey("sheet_values", { id: spreadsheetId, range });
+  async readSheetValues(spreadsheetId: string, range: string, accountEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("sheet_values", { id: spreadsheetId, range, account: accountEmail });
     return cache.getOrFetch(
       cacheKey,
-      () => this.callTool("read_sheet_values", { spreadsheet_id: spreadsheetId, range_name: range }),
+      () => {
+        const args: Record<string, any> = { spreadsheet_id: spreadsheetId, range_name: range };
+        if (accountEmail) args.user_google_email = accountEmail;
+        return this.callTool("read_sheet_values", args);
+      },
       { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Writes values to a spreadsheet range. @invalidates sheet_values/{spreadsheetId}/{range} */
   async writeSheetValues(spreadsheetId: string, range: string, values: any[][]): Promise<any> {
     const result = await this.callTool("modify_sheet_values", { spreadsheet_id: spreadsheetId, range_name: range, values });
     cache.invalidate(createCacheKey("sheet_values", { id: spreadsheetId, range }));
     return result;
   }
 
-  /**
-   * Write rich text with multiple hyperlinks to a single cell.
-   *
-   * @param spreadsheetId - The spreadsheet ID
-   * @param cell - Cell reference in A1 notation (e.g., "AD2", "Sheet1!B5")
-   * @param segments - Array of RichTextSegment objects (text + optional url/formatting)
-   * @param sheetName - Optional sheet name (default: first sheet)
-   *
-   * @example
-   * await client.writeRichTextCell(spreadsheetId, "AD2", [
-   *   { text: "WARNING: ", bold: true, foregroundColor: "#FF0000" },
-   *   { text: "See " },
-   *   { text: "ticket #123", url: "https://gorgias.com/ticket/123" }
-   * ]);
-   */
+  async expandSheetGrid(
+    spreadsheetId: string,
+    sheetName: string,
+    insertRows: number,
+    insertColumns: number,
+  ): Promise<unknown> {
+    return this.callTool("resize_sheet_dimensions", {
+      spreadsheet_id: spreadsheetId,
+      sheet_name: sheetName,
+      insert_rows: insertRows,
+      insert_columns: insertColumns,
+    });
+  }
+
+  async getForm(formId: string, accountEmail?: string): Promise<unknown> {
+    const args: Record<string, unknown> = { form_id: formId };
+    if (accountEmail) args.user_google_email = accountEmail;
+    return this.callTool("get_form", args);
+  }
+
+  async getFormResponse(formId: string, responseId: string, accountEmail?: string): Promise<unknown> {
+    const args: Record<string, unknown> = { form_id: formId, response_id: responseId };
+    if (accountEmail) args.user_google_email = accountEmail;
+    return this.callTool("get_form_response", args);
+  }
+
+  async listFormResponses(
+    formId: string,
+    pageSize?: number,
+    pageToken?: string,
+    accountEmail?: string,
+  ): Promise<unknown> {
+    const args: Record<string, unknown> = { form_id: formId };
+    if (pageSize) args.page_size = pageSize;
+    if (pageToken) args.page_token = pageToken;
+    if (accountEmail) args.user_google_email = accountEmail;
+    return this.callTool("list_form_responses", args);
+  }
+
+  async listDirectoryUsers(options: Record<string, unknown> = {}): Promise<unknown> {
+    return this.callTool("list_directory_users", options);
+  }
+
+  async getDirectoryUser(userKey: string): Promise<unknown> {
+    return this.callTool("get_directory_user", { user_key: userKey });
+  }
+
+  async listDirectoryUserAliases(userKey: string): Promise<unknown> {
+    return this.callTool("list_directory_user_aliases", { user_key: userKey });
+  }
+
+  async listDirectoryGroups(
+    options: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return this.callTool("list_directory_groups", options);
+  }
+
+  async getDirectoryGroup(groupKey: string): Promise<unknown> {
+    return this.callTool("get_directory_group", { group_key: groupKey });
+  }
+
+  async listDirectoryGroupAliases(groupKey: string): Promise<unknown> {
+    return this.callTool("list_directory_group_aliases", { group_key: groupKey });
+  }
+
+  async listDirectoryGroupMembers(
+    groupKey: string,
+    options: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    return this.callTool("list_directory_group_members", {
+      group_key: groupKey,
+      ...options,
+    });
+  }
+
+  async getDirectoryGroupMember(
+    groupKey: string,
+    memberKey: string,
+  ): Promise<unknown> {
+    return this.callTool("get_directory_group_member", {
+      group_key: groupKey,
+      member_key: memberKey,
+    });
+  }
+
+  async getGroupSettings(groupEmail: string): Promise<unknown> {
+    return this.callTool("get_group_settings", { group_email: groupEmail });
+  }
+
+  async createDirectoryGroup(
+    groupEmail: string,
+    name: string,
+    description: string,
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("create_directory_group", {
+      group_email: groupEmail,
+      name,
+      description,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
+  async insertDirectoryGroupMember(
+    groupKey: string,
+    memberEmail: string,
+    role: "OWNER" | "MANAGER" | "MEMBER",
+    deliverySettings: "ALL_MAIL" | "DAILY" | "DIGEST" | "DISABLED" | "NONE",
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("insert_directory_group_member", {
+      group_key: groupKey,
+      member_email: memberEmail,
+      role,
+      delivery_settings: deliverySettings,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
+  async patchGroupSettings(
+    groupEmail: string,
+    settings: Record<string, unknown>,
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("patch_group_settings", {
+      group_email: groupEmail,
+      settings,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
+  async insertDirectoryUserAlias(
+    userKey: string,
+    alias: string,
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("insert_directory_user_alias", {
+      user_key: userKey,
+      alias,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
+  async deleteDirectoryUserAlias(
+    userKey: string,
+    alias: string,
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("delete_directory_user_alias", {
+      user_key: userKey,
+      alias,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
+  async listGmailSendAs(accountEmail?: string): Promise<unknown> {
+    const args: Record<string, unknown> = {};
+    if (accountEmail) args.user_google_email = accountEmail;
+    return this.callTool("list_gmail_send_as", args);
+  }
+
+  async updateGmailSendAs(sendAsEmail: string, options: Record<string, unknown>): Promise<unknown> {
+    return this.callTool("update_gmail_send_as", {
+      send_as_email: sendAsEmail,
+      ...options,
+    });
+  }
+
+  async deleteGmailSendAs(
+    sendAsEmail: string,
+    dryRun: boolean,
+    confirmation?: string,
+  ): Promise<unknown> {
+    return this.callTool("delete_gmail_send_as", {
+      send_as_email: sendAsEmail,
+      dry_run: dryRun,
+      confirmation,
+    });
+  }
+
   async writeRichTextCell(
     spreadsheetId: string,
     cell: string,
@@ -529,26 +962,11 @@ export class GoogleWorkspaceMCPClient {
 
     const result = await this.callTool("write_rich_text_cell", args);
 
-    // Invalidate cache for this spreadsheet (all ranges since we don't know the exact range)
-    cache.invalidatePattern(new RegExp(`^sheet_values:.*${spreadsheetId}`));
+    cache.invalidatePattern(sheetValuesCachePattern(spreadsheetId));
 
     return result;
   }
 
-  /**
-   * Write rich text to multiple cells in a single API call.
-   *
-   * @param spreadsheetId - The spreadsheet ID
-   * @param cells - Array of {cell: string, segments: RichTextSegment[]} objects
-   * @param sheetName - Optional sheet name (default: first sheet)
-   *
-   * @example
-   * await client.writeRichTextCells(spreadsheetId, [
-   *   { cell: "AD2", segments: [{ text: "Bold", bold: true }] },
-   *   { cell: "AD3", segments: [{ text: "Link", url: "https://..." }] },
-   *   { cell: "AD4", segments: [{ text: "Red", foregroundColor: "#FF0000" }] }
-   * ]);
-   */
   async writeRichTextCells(
     spreadsheetId: string,
     cells: RichTextCellDef[],
@@ -565,24 +983,18 @@ export class GoogleWorkspaceMCPClient {
 
     const result = await this.callTool("write_rich_text_cells", args);
 
-    // Invalidate cache for this spreadsheet
-    cache.invalidatePattern(new RegExp(`^sheet_values:.*${spreadsheetId}`));
+    cache.invalidatePattern(sheetValuesCachePattern(spreadsheetId));
 
     return result;
   }
 
-  /** Creates a new spreadsheet with optional named sheets. */
   async createSpreadsheet(title: string, sheetNames?: string[]): Promise<any> {
     const args: Record<string, any> = { title };
     if (sheetNames) args.sheet_names = sheetNames;
     return this.callTool("create_spreadsheet", args);
   }
 
-  // ============================================
-  // TASKS OPERATIONS
-  // ============================================
 
-  /** Lists all task lists. @cached TTL: 15 minutes */
   async listTaskLists(): Promise<any> {
     return cache.getOrFetch(
       "task_lists",
@@ -591,7 +1003,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Lists tasks in a task list. @cached TTL: 5 minutes */
   async listTasks(taskListId: string): Promise<any> {
     const cacheKey = createCacheKey("tasks", { listId: taskListId });
     return cache.getOrFetch(
@@ -601,7 +1012,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Creates a new task. @invalidates tasks/{taskListId} */
   async createTask(taskListId: string, title: string, notes?: string, due?: string): Promise<any> {
     const args: Record<string, any> = { task_list_id: taskListId, title };
     if (notes) args.notes = notes;
@@ -611,28 +1021,26 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Marks a task as completed. @invalidates tasks/{taskListId} */
   async completeTask(taskListId: string, taskId: string): Promise<any> {
-    const result = await this.callTool("update_task", { tasklist_id: taskListId, task_id: taskId, status: "completed" });
+    const result = await this.callTool("update_task", { task_list_id: taskListId, task_id: taskId, status: "completed" });
     cache.invalidate(createCacheKey("tasks", { listId: taskListId }));
     return result;
   }
 
-  // ============================================
-  // DOCUMENT COMMENTS OPERATIONS
-  // ============================================
 
-  /** Gets comments on a Google Doc. @cached TTL: 15 minutes */
-  async getDocumentComments(documentId: string): Promise<any> {
-    const cacheKey = createCacheKey("doc_comments", { id: documentId });
+  async getDocumentComments(documentId: string, userEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("doc_comments", { id: documentId, account: userEmail });
     return cache.getOrFetch(
       cacheKey,
-      () => this.callTool("read_document_comments", { document_id: documentId }),
+      () => {
+        const args: Record<string, any> = { document_id: documentId };
+        if (userEmail) args.user_google_email = userEmail;
+        return this.callTool("read_document_comments", args);
+      },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Creates a comment on a Google Doc. @invalidates doc_comments/{documentId} */
   async createDocumentComment(documentId: string, text: string, location?: Record<string, any>): Promise<any> {
     const args: Record<string, any> = { document_id: documentId, text };
     if (location) args.location = location;
@@ -641,25 +1049,19 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Replies to a document comment. @invalidates doc_comments/{documentId} */
   async replyToDocumentComment(documentId: string, commentId: string, text: string): Promise<any> {
     const result = await this.callTool("reply_to_document_comment", { document_id: documentId, comment_id: commentId, text });
     cache.invalidate(createCacheKey("doc_comments", { id: documentId }));
     return result;
   }
 
-  /** Resolves a document comment. @invalidates doc_comments/{documentId} */
   async resolveDocumentComment(documentId: string, commentId: string): Promise<any> {
     const result = await this.callTool("resolve_document_comment", { document_id: documentId, comment_id: commentId });
     cache.invalidate(createCacheKey("doc_comments", { id: documentId }));
     return result;
   }
 
-  // ============================================
-  // SPREADSHEET COMMENTS OPERATIONS
-  // ============================================
 
-  /** Gets comments on a spreadsheet. @cached TTL: 15 minutes */
   async getSpreadsheetComments(spreadsheetId: string): Promise<any> {
     const cacheKey = createCacheKey("sheet_comments", { id: spreadsheetId });
     return cache.getOrFetch(
@@ -669,60 +1071,25 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /**
-   * Creates a comment on a spreadsheet cell.
-   *
-   * @param spreadsheetId - The spreadsheet ID
-   * @param sheetId - Numeric sheet ID (from getSpreadsheetInfo)
-   * @param rowIndex - Zero-based row index
-   * @param columnIndex - Zero-based column index
-   * @param text - Comment text
-   * @returns Created comment details
-   *
-   * @invalidates sheet_comments/{spreadsheetId}
-   */
   async createSpreadsheetComment(spreadsheetId: string, sheetId: number, rowIndex: number, columnIndex: number, text: string): Promise<any> {
     const result = await this.callTool("create_spreadsheet_comment", { spreadsheet_id: spreadsheetId, sheet_id: sheetId, row_index: rowIndex, column_index: columnIndex, text });
     cache.invalidate(createCacheKey("sheet_comments", { id: spreadsheetId }));
     return result;
   }
 
-  /**
-   * Replies to a spreadsheet comment.
-   *
-   * @param spreadsheetId - The spreadsheet ID
-   * @param commentId - ID of the comment to reply to
-   * @param text - Reply text
-   * @returns Reply details
-   *
-   * @invalidates sheet_comments/{spreadsheetId}
-   */
   async replyToSpreadsheetComment(spreadsheetId: string, commentId: string, text: string): Promise<any> {
     const result = await this.callTool("reply_to_spreadsheet_comment", { spreadsheet_id: spreadsheetId, comment_id: commentId, text });
     cache.invalidate(createCacheKey("sheet_comments", { id: spreadsheetId }));
     return result;
   }
 
-  /**
-   * Resolves (closes) a spreadsheet comment.
-   *
-   * @param spreadsheetId - The spreadsheet ID
-   * @param commentId - ID of the comment to resolve
-   * @returns Updated comment details
-   *
-   * @invalidates sheet_comments/{spreadsheetId}
-   */
   async resolveSpreadsheetComment(spreadsheetId: string, commentId: string): Promise<any> {
     const result = await this.callTool("resolve_spreadsheet_comment", { spreadsheet_id: spreadsheetId, comment_id: commentId });
     cache.invalidate(createCacheKey("sheet_comments", { id: spreadsheetId }));
     return result;
   }
 
-  // ============================================
-  // GMAIL FILTERS & LABELS OPERATIONS
-  // ============================================
 
-  /** Lists all Gmail filters. @cached TTL: 1 hour */
   async listGmailFilters(): Promise<any> {
     return cache.getOrFetch(
       "gmail_filters",
@@ -731,7 +1098,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Manages Gmail filters (create/delete). @invalidates gmail_filters */
   async manageGmailFilter(
     action: "create" | "delete",
     options: { criteria?: Record<string, any>; filterAction?: Record<string, any>; filterId?: string }
@@ -745,7 +1111,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Manages Gmail labels (create/update/delete). @invalidates gmail_labels */
   async manageGmailLabel(
     action: "create" | "update" | "delete",
     options: { name?: string; labelId?: string; labelListVisibility?: string; messageListVisibility?: string }
@@ -760,7 +1125,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Modifies labels on a Gmail message. @invalidates gmail_search/* */
   async modifyGmailMessageLabels(
     messageId: string,
     addLabelIds?: string[],
@@ -774,21 +1138,41 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Gets content of multiple Gmail messages in batch (max 25). @cached TTL: 5 minutes */
-  async getGmailMessagesBatch(messageIds: string[], format: "full" | "metadata" = "full"): Promise<any> {
-    const cacheKey = createCacheKey("gmail_batch", { ids: messageIds.join(","), format });
+  async getGmailMessagesBatch(
+    messageIds: string[],
+    format: "full" | "metadata" = "full",
+    bodyFormat?: "text" | "html" | "raw"
+  ): Promise<any> {
+    const cacheKey = createCacheKey("gmail_batch", { ids: messageIds.join(","), format, bodyFormat });
+    const toolArgs: Record<string, any> = { message_ids: messageIds, format };
+    if (bodyFormat) {
+      toolArgs.body_format = bodyFormat;
+    }
     return cache.getOrFetch(
       cacheKey,
-      () => this.callTool("get_gmail_messages_content_batch", { message_ids: messageIds, format }),
+      () => this.callTool("get_gmail_messages_content_batch", toolArgs),
       { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  // ============================================
-  // CONTACTS OPERATIONS
-  // ============================================
+  async getGmailMessageRaw(messageId: string, userEmail?: string): Promise<any> {
+    const cacheKey = createCacheKey("gmail_raw_message", { id: messageId, userEmail });
+    const toolArgs: Record<string, any> = {
+      message_ids: [messageId],
+      format: "full",
+      body_format: "raw",
+    };
+    if (userEmail) {
+      toolArgs.user_google_email = userEmail;
+    }
+    return cache.getOrFetch(
+      cacheKey,
+      () => this.callTool("get_gmail_messages_content_batch", toolArgs),
+      { ttl: TTL.FIVE_MINUTES, bypassCache: this.cacheDisabled }
+    );
+  }
 
-  /** Lists contacts. @cached TTL: 15 minutes */
+
   async listContacts(pageSize?: number, sortOrder?: string, pageToken?: string): Promise<any> {
     const cacheKey = createCacheKey("contacts_list", { pageSize, sortOrder, pageToken });
     return cache.getOrFetch(
@@ -804,7 +1188,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Gets a specific contact's details. @cached TTL: 15 minutes */
   async getContact(contactId: string): Promise<any> {
     const cacheKey = createCacheKey("contact", { id: contactId });
     return cache.getOrFetch(
@@ -814,7 +1197,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Searches contacts. @cached TTL: 5 minutes */
   async searchContacts(query: string, pageSize?: number): Promise<any> {
     const cacheKey = createCacheKey("contacts_search", { query, pageSize });
     return cache.getOrFetch(
@@ -828,7 +1210,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Manages contacts (create/update/delete). @invalidates contacts_* */
   async manageContact(
     action: "create" | "update" | "delete",
     options: {
@@ -852,7 +1233,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Lists contact groups/labels. @cached TTL: 15 minutes */
   async listContactGroups(pageSize?: number): Promise<any> {
     const cacheKey = createCacheKey("contact_groups", { pageSize });
     return cache.getOrFetch(
@@ -866,11 +1246,7 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // CHAT OPERATIONS
-  // ============================================
 
-  /** Lists Chat spaces. @cached TTL: 15 minutes */
   async listChatSpaces(spaceType?: string, pageSize?: number): Promise<any> {
     const cacheKey = createCacheKey("chat_spaces", { spaceType, pageSize });
     return cache.getOrFetch(
@@ -885,7 +1261,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Gets messages from a Chat space. @cached TTL: 5 minutes */
   async getChatMessages(spaceId: string, pageSize?: number, orderBy?: string): Promise<any> {
     const cacheKey = createCacheKey("chat_messages", { spaceId, pageSize, orderBy });
     return cache.getOrFetch(
@@ -900,7 +1275,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Sends a message to a Chat space. @invalidates chat_messages/* */
   async sendChatMessage(spaceId: string, text: string, threadName?: string, threadKey?: string): Promise<any> {
     const args: Record<string, any> = { space_id: spaceId, message_text: text };
     if (threadName) args.thread_name = threadName;
@@ -910,7 +1284,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Searches Chat messages. @cached TTL: 5 minutes */
   async searchChatMessages(query: string, spaceId?: string, pageSize?: number): Promise<any> {
     const cacheKey = createCacheKey("chat_search", { query, spaceId, pageSize });
     return cache.getOrFetch(
@@ -925,11 +1298,7 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // ADVANCED DRIVE OPERATIONS
-  // ============================================
 
-  /** Copies a Drive file. */
   async copyDriveFile(fileId: string, newName?: string, parentFolderId?: string): Promise<any> {
     const args: Record<string, any> = { file_id: fileId };
     if (newName) args.new_name = newName;
@@ -937,14 +1306,49 @@ export class GoogleWorkspaceMCPClient {
     return this.callTool("copy_drive_file", args);
   }
 
-  /** Creates a Drive folder. */
   async createDriveFolder(folderName: string, parentFolderId?: string): Promise<any> {
     const args: Record<string, any> = { folder_name: folderName };
     if (parentFolderId) args.parent_folder_id = parentFolderId;
-    return this.callTool("create_drive_folder", args);
+    const result = await this.callTool("create_drive_folder", args);
+    this.invalidateDriveListings();
+    return result;
   }
 
-  /** Gets a shareable link for a Drive file. @cached TTL: 15 minutes */
+  private invalidateDriveListings(): void {
+    cache.invalidatePattern(/^drive_search/);
+    cache.invalidatePattern(/^drive_items/);
+  }
+
+  async createDriveFile(options: {
+    fileName: string;
+    content?: string;
+    fileUrl?: string;
+    folderId?: string;
+    mimeType?: string;
+    accountEmail?: string;
+  }): Promise<unknown> {
+    const args: Record<string, unknown> = { file_name: options.fileName };
+    if (options.content !== undefined) args.content = options.content;
+    if (options.fileUrl !== undefined) args.fileUrl = options.fileUrl;
+    if (options.folderId !== undefined) args.folder_id = options.folderId;
+    if (options.mimeType !== undefined) args.mime_type = options.mimeType;
+    if (options.accountEmail !== undefined) args.user_google_email = options.accountEmail;
+    const result = await this.callTool("create_drive_file", args);
+    this.invalidateDriveListings();
+    return result;
+  }
+
+  async trashDriveFile(fileId: string, accountEmail?: string): Promise<unknown> {
+    const args: Record<string, unknown> = {
+      file_id: fileId,
+      trashed: true,
+    };
+    if (accountEmail !== undefined) args.user_google_email = accountEmail;
+    const result = await this.callTool("update_drive_file", args);
+    cache.invalidatePattern(/^drive_/);
+    return result;
+  }
+
   async getDriveShareLink(fileId: string): Promise<any> {
     const cacheKey = createCacheKey("drive_share_link", { id: fileId });
     return cache.getOrFetch(
@@ -954,13 +1358,12 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Manages Drive file access permissions. @invalidates drive_* for this file */
   async manageDriveAccess(
     fileId: string,
     action: "grant" | "grant_batch" | "update" | "revoke" | "transfer_owner",
     options: {
       shareWith?: string; role?: string; shareType?: string;
-      permissionId?: string; recipients?: any[];
+      permissionId?: string; recipients?: unknown[];
       sendNotification?: boolean; emailMessage?: string;
       expirationTime?: string; newOwnerEmail?: string;
     } = {}
@@ -980,7 +1383,6 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /** Gets Drive file permissions/metadata. @cached TTL: 15 minutes */
   async getDriveFilePermissions(fileId: string): Promise<any> {
     const cacheKey = createCacheKey("drive_permissions", { id: fileId });
     return cache.getOrFetch(
@@ -990,18 +1392,15 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // ADVANCED CALENDAR OPERATIONS
-  // ============================================
 
-  /** Manages calendar events (create/update/delete). @invalidates calendar_events/* */
   async manageEvent(
     action: "create" | "update" | "delete",
     options: {
       summary?: string; startTime?: string; endTime?: string;
       eventId?: string; calendarId?: string; description?: string;
-      location?: string; attendees?: any; timezone?: string;
+      location?: string; attendees?: unknown; timezone?: string;
       addGoogleMeet?: boolean; transparency?: string; visibility?: string;
+      sendUpdates?: string;
     } = {}
   ): Promise<any> {
     const args: Record<string, any> = { action };
@@ -1017,12 +1416,12 @@ export class GoogleWorkspaceMCPClient {
     if (options.addGoogleMeet !== undefined) args.add_google_meet = options.addGoogleMeet;
     if (options.transparency) args.transparency = options.transparency;
     if (options.visibility) args.visibility = options.visibility;
+    if (options.sendUpdates) args.send_updates = options.sendUpdates;
     const result = await this.callTool("manage_event", args);
     cache.invalidatePattern(/^calendar_events/);
     return result;
   }
 
-  /** Queries free/busy info for calendars. @cached TTL: 5 minutes */
   async queryFreebusy(timeMin: string, timeMax: string, calendarIds?: string[]): Promise<any> {
     const cacheKey = createCacheKey("freebusy", { timeMin, timeMax, cals: calendarIds?.join(",") });
     return cache.getOrFetch(
@@ -1036,11 +1435,7 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // ADVANCED DOCS OPERATIONS
-  // ============================================
 
-  /** Exports a Google Doc to PDF. */
   async exportDocToPdf(documentId: string, pdfFilename?: string, folderId?: string): Promise<any> {
     const args: Record<string, any> = { document_id: documentId };
     if (pdfFilename) args.pdf_filename = pdfFilename;
@@ -1048,10 +1443,14 @@ export class GoogleWorkspaceMCPClient {
     return this.callTool("export_doc_to_pdf", args);
   }
 
-  /** Gets a Google Doc as clean Markdown. @cached TTL: 15 minutes */
   async getDocAsMarkdown(
     documentId: string,
-    options: { includeComments?: boolean; commentMode?: string; includeResolved?: boolean } = {}
+    options: {
+      includeComments?: boolean;
+      commentMode?: string;
+      includeResolved?: boolean;
+      suggestionsViewMode?: string;
+    } = {}
   ): Promise<any> {
     const cacheKey = createCacheKey("doc_markdown", { id: documentId, ...options });
     return cache.getOrFetch(
@@ -1061,13 +1460,13 @@ export class GoogleWorkspaceMCPClient {
         if (options.includeComments !== undefined) args.include_comments = options.includeComments;
         if (options.commentMode) args.comment_mode = options.commentMode;
         if (options.includeResolved !== undefined) args.include_resolved = options.includeResolved;
+        if (options.suggestionsViewMode) args.suggestions_view_mode = options.suggestionsViewMode;
         return this.callTool("get_doc_as_markdown", args);
       },
       { ttl: TTL.FIFTEEN_MINUTES, bypassCache: this.cacheDisabled }
     );
   }
 
-  /** Lists Google Docs in a folder. @cached TTL: 15 minutes */
   async listDocsInFolder(folderId?: string, pageSize?: number): Promise<any> {
     const cacheKey = createCacheKey("docs_in_folder", { folder: folderId || "root", pageSize });
     return cache.getOrFetch(
@@ -1082,11 +1481,7 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  // ============================================
-  // ADVANCED SHEETS OPERATIONS
-  // ============================================
 
-  /** Formats a sheet range (colors, fonts, alignment, etc.). */
   async formatSheetRange(
     spreadsheetId: string,
     rangeName: string,
@@ -1110,22 +1505,17 @@ export class GoogleWorkspaceMCPClient {
     if (options.italic !== undefined) args.italic = options.italic;
     if (options.fontSize) args.font_size = options.fontSize;
     const result = await this.callTool("format_sheet_range", args);
-    cache.invalidatePattern(new RegExp(`^sheet_values:.*${spreadsheetId}`));
+    cache.invalidatePattern(sheetValuesCachePattern(spreadsheetId));
     return result;
   }
 
-  /** Creates a new sheet tab in an existing spreadsheet. */
   async createSheet(spreadsheetId: string, sheetName: string): Promise<any> {
     const result = await this.callTool("create_sheet", { spreadsheet_id: spreadsheetId, sheet_name: sheetName });
     cache.invalidate(createCacheKey("spreadsheet_info", { id: spreadsheetId }));
     return result;
   }
 
-  // ============================================
-  // ADVANCED TASKS OPERATIONS
-  // ============================================
 
-  /** Gets a specific task. @cached TTL: 5 minutes */
   async getTask(taskListId: string, taskId: string): Promise<any> {
     const cacheKey = createCacheKey("task", { listId: taskListId, id: taskId });
     return cache.getOrFetch(
@@ -1135,7 +1525,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /** Manages tasks (create/update/delete/move). @invalidates tasks/* */
   async manageTask(
     action: "create" | "update" | "delete" | "move",
     taskListId: string,
@@ -1160,11 +1549,7 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  // ============================================
-  // PRESENTATION COMMENTS OPERATIONS
-  // ============================================
 
-  /** Gets comments on a Google Slides presentation. @cached TTL: 15 minutes */
   async getPresentationComments(presentationId: string): Promise<any> {
     const cacheKey = createCacheKey("presentation_comments", { id: presentationId });
     return cache.getOrFetch(
@@ -1174,17 +1559,6 @@ export class GoogleWorkspaceMCPClient {
     );
   }
 
-  /**
-   * Creates a comment on a presentation slide.
-   *
-   * @param presentationId - The presentation ID
-   * @param slideId - ID of the slide to comment on
-   * @param text - Comment text
-   * @param location - Optional location anchor within the slide
-   * @returns Created comment details
-   *
-   * @invalidates presentation_comments/{presentationId}
-   */
   async createPresentationComment(presentationId: string, slideId: string, text: string, location?: Record<string, any>): Promise<any> {
     const args: Record<string, any> = { presentation_id: presentationId, slide_id: slideId, text };
     if (location) args.location = location;
@@ -1193,31 +1567,12 @@ export class GoogleWorkspaceMCPClient {
     return result;
   }
 
-  /**
-   * Replies to a presentation comment.
-   *
-   * @param presentationId - The presentation ID
-   * @param commentId - ID of the comment to reply to
-   * @param text - Reply text
-   * @returns Reply details
-   *
-   * @invalidates presentation_comments/{presentationId}
-   */
   async replyToPresentationComment(presentationId: string, commentId: string, text: string): Promise<any> {
     const result = await this.callTool("reply_to_presentation_comment", { presentation_id: presentationId, comment_id: commentId, text });
     cache.invalidate(createCacheKey("presentation_comments", { id: presentationId }));
     return result;
   }
 
-  /**
-   * Resolves (closes) a presentation comment.
-   *
-   * @param presentationId - The presentation ID
-   * @param commentId - ID of the comment to resolve
-   * @returns Updated comment details
-   *
-   * @invalidates presentation_comments/{presentationId}
-   */
   async resolvePresentationComment(presentationId: string, commentId: string): Promise<any> {
     const result = await this.callTool("resolve_presentation_comment", { presentation_id: presentationId, comment_id: commentId });
     cache.invalidate(createCacheKey("presentation_comments", { id: presentationId }));

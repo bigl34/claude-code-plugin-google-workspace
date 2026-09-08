@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+
+LOCAL_SOURCE="$HOME/repos/work/mcp-servers/google_workspace_mcp"
+RUNTIME_SELECTOR="${XDG_STATE_HOME:-$HOME/.local/state}/biz/update-forks/google_workspace_mcp.runtime"
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+GOOGLE_OAUTH_CLIENT_ID="$(pass your-secret-store/google-workspace/client-id)"
+GOOGLE_OAUTH_CLIENT_SECRET="$(pass your-secret-store/google-workspace/client-secret)"
+USER_GOOGLE_EMAIL="$(pass your-secret-store/google-workspace/user-email)"
+export GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET USER_GOOGLE_EMAIL
+export WORKSPACE_MCP_CREDENTIALS_DIR="$HOME/.google_workspace_mcp/credentials"
+
+[[ -n "$GOOGLE_OAUTH_CLIENT_ID" ]] || { echo "Missing client-id from pass" >&2; exit 1; }
+[[ -n "$GOOGLE_OAUTH_CLIENT_SECRET" ]] || { echo "Missing client-secret from pass" >&2; exit 1; }
+[[ -n "$USER_GOOGLE_EMAIL" ]] || { echo "Missing user-email from pass" >&2; exit 1; }
+[[ -f "$LOCAL_SOURCE/pyproject.toml" ]] || {
+  echo "Missing local Workspace MCP source: $LOCAL_SOURCE" >&2
+  exit 1
+}
+if [ -L "$RUNTIME_SELECTOR" ]; then
+  export UV_PROJECT_ENVIRONMENT="$RUNTIME_SELECTOR"
+elif [ -e "$RUNTIME_SELECTOR" ]; then
+  echo "Invalid Google Workspace runtime selector: $RUNTIME_SELECTOR" >&2
+  exit 1
+fi
+
+exec uv run --project "$LOCAL_SOURCE" --frozen --no-dev \
+  workspace-mcp --single-user --tool-tier extended "$@"
