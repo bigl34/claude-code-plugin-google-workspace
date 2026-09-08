@@ -1,5 +1,6 @@
 {
   "name": "google-workspace-manager",
-  "version": "1.10.0",
-  "description": "Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, Chat, Filters, Comments)"
+  "version": "1.12.0",
+  "description": "Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, Chat, Filters, Comments)",
+  "repository": "https://github.com/bigl34/claude-code-plugin-google-workspace"
 }
