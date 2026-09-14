@@ -35,6 +35,21 @@ export function sheetValuesCachePattern(spreadsheetId: string): RegExp {
   return new RegExp(`^sheet_values\\?(?:[^&]+&)*id=${escapedSpreadsheetId}(?:&|$)`); // nosemgrep: detect-non-literal-regexp
 }
 
+export function docCachePattern(documentId: string): RegExp {
+  const escapedDocumentId = documentId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^(?:doc_content|doc_markdown)\\?(?:[^&]+&)*id=${escapedDocumentId}(?:&|$)`); // nosemgrep: detect-non-literal-regexp
+}
+
+const DOCS_URL_ID_PATTERN = /\/d\/([A-Za-z0-9_-]+)/;
+
+export function normalizeDocumentId(documentIdOrUrl: string): string {
+  const urlMatch = DOCS_URL_ID_PATTERN.exec(documentIdOrUrl);
+  if (urlMatch === null) {
+    return documentIdOrUrl;
+  }
+  return urlMatch[1];
+}
+
 const DEFAULT_LOCAL_MCP_SOURCE = join(
   homedir(),
   "repos",
@@ -637,11 +652,12 @@ export class GoogleWorkspaceMCPClient {
   }
 
   async getDocContent(documentId: string, suggestionsViewMode?: string, userEmail?: string): Promise<any> {
-    const cacheKey = createCacheKey("doc_content", { id: documentId, mode: suggestionsViewMode, account: userEmail });
+    const normalizedDocumentId = normalizeDocumentId(documentId);
+    const cacheKey = createCacheKey("doc_content", { id: normalizedDocumentId, mode: suggestionsViewMode, account: userEmail });
     return cache.getOrFetch(
       cacheKey,
       () => {
-        const args: Record<string, any> = { document_id: documentId };
+        const args: Record<string, any> = { document_id: normalizedDocumentId };
         if (suggestionsViewMode) args.suggestions_view_mode = suggestionsViewMode;
         if (userEmail) args.user_google_email = userEmail;
         return this.callTool("get_doc_content", args);
@@ -673,8 +689,9 @@ export class GoogleWorkspaceMCPClient {
       fontFamily?: string;
     }
   ): Promise<any> {
+    const normalizedDocumentId = normalizeDocumentId(documentId);
     const args: Record<string, any> = {
-      document_id: documentId,
+      document_id: normalizedDocumentId,
       operation
     };
     if (options.index !== undefined) args.index = options.index;
@@ -688,7 +705,7 @@ export class GoogleWorkspaceMCPClient {
     if (options.fontFamily) args.font_family = options.fontFamily;
 
     const result = await this.callTool("modify_doc_text", args);
-    cache.invalidate(createCacheKey("doc_content", { id: documentId }));
+    cache.invalidatePattern(docCachePattern(normalizedDocumentId));
     return result;
   }
 
@@ -698,13 +715,14 @@ export class GoogleWorkspaceMCPClient {
     replaceText: string,
     replaceAll: boolean = true
   ): Promise<any> {
+    const normalizedDocumentId = normalizeDocumentId(documentId);
     const result = await this.callTool("find_and_replace_doc", {
-      document_id: documentId,
+      document_id: normalizedDocumentId,
       find_text: findText,
       replace_text: replaceText,
       replace_all: replaceAll
     });
-    cache.invalidate(createCacheKey("doc_content", { id: documentId }));
+    cache.invalidatePattern(docCachePattern(normalizedDocumentId));
     return result;
   }
 
@@ -749,7 +767,23 @@ export class GoogleWorkspaceMCPClient {
   }
 
   async writeSheetValues(spreadsheetId: string, range: string, values: any[][]): Promise<any> {
-    const result = await this.callTool("modify_sheet_values", { spreadsheet_id: spreadsheetId, range_name: range, values });
+    if (!Array.isArray(values)) throw new Error("Sheet values must be an array of rows");
+    for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+      const row = values[rowIndex];
+      if (!Array.isArray(row)) throw new Error(`Sheet row ${rowIndex + 1} must be an array`);
+      for (let columnIndex = 0; columnIndex < row.length; columnIndex++) {
+        const cell = row[columnIndex];
+        if (cell !== null && typeof cell !== "string" && typeof cell !== "boolean" &&
+            !(typeof cell === "number" && Number.isFinite(cell))) {
+          throw new Error(`Unsupported sheet value at row ${rowIndex + 1}, column ${columnIndex + 1}`);
+        }
+      }
+    }
+    const result = await this.callTool("modify_sheet_values", {
+      spreadsheet_id: spreadsheetId,
+      range_name: range,
+      values: JSON.stringify(values),
+    });
     cache.invalidate(createCacheKey("sheet_values", { id: spreadsheetId, range }));
     return result;
   }
@@ -1440,7 +1474,9 @@ export class GoogleWorkspaceMCPClient {
     const args: Record<string, any> = { document_id: documentId };
     if (pdfFilename) args.pdf_filename = pdfFilename;
     if (folderId) args.folder_id = folderId;
-    return this.callTool("export_doc_to_pdf", args);
+    const result = await this.callTool("export_doc_to_pdf", args);
+    this.invalidateDriveListings();
+    return result;
   }
 
   async getDocAsMarkdown(
@@ -1452,11 +1488,12 @@ export class GoogleWorkspaceMCPClient {
       suggestionsViewMode?: string;
     } = {}
   ): Promise<any> {
-    const cacheKey = createCacheKey("doc_markdown", { id: documentId, ...options });
+    const normalizedDocumentId = normalizeDocumentId(documentId);
+    const cacheKey = createCacheKey("doc_markdown", { id: normalizedDocumentId, ...options });
     return cache.getOrFetch(
       cacheKey,
       async () => {
-        const args: Record<string, any> = { document_id: documentId };
+        const args: Record<string, any> = { document_id: normalizedDocumentId };
         if (options.includeComments !== undefined) args.include_comments = options.includeComments;
         if (options.commentMode) args.comment_mode = options.commentMode;
         if (options.includeResolved !== undefined) args.include_resolved = options.includeResolved;

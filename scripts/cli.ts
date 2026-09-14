@@ -2420,8 +2420,8 @@ export const commands = {
       const { id, filename, folderId } = args as { id: string; filename?: string; folderId?: string };
       return client.exportDocToPdf(id, filename, folderId);
     },
-    "Export document to PDF",
-    { sideEffect: "read" }
+    "Export document to PDF and save the PDF in Drive (root or --folder-id)",
+    { sideEffect: "write" }
   ),
 
   "get-doc-markdown": createCommand(

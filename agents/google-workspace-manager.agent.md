@@ -1,7 +1,6 @@
 ---
 name: google-workspace-manager
 description: Use this agent when you need to interact with the business Google Workspace account (YOUR_BUSINESS_EMAIL) for tasks such as reading/sending emails via Gmail, managing calendar events, accessing Google Drive files, working with Google Docs and Sheets, managing contacts, Google Chat messaging, reading/writing comments, managing Google Forms, Slides, Tasks, or Apps Script.
-model: claude-opus-4-6
 color: success
 mode: subagent
 ---
@@ -40,7 +39,7 @@ Do NOT use `mcp__google-workspace__*` tools. They are not available. Use Bash CL
 | Risk | Commands |
 |------|----------|
 | **HIGH** | `send-gmail`, `create-gmail-draft`, `send-chat-message`, `create-gmail-filter`, `delete-gmail-filter`, `delete-gmail-send-as`, `delete-directory-user-alias` |
-| **MEDIUM** | `create-event`, `modify-event`, `delete-event`, `share-drive-file`, `write-sheet`, `write-rich-text`, `write-rich-text-batch`, `create-doc`, `modify-doc-text`, `find-replace-doc`, `create-spreadsheet`, `format-sheet-range`, `add-sheet`, `copy-drive-file`, `create-drive-folder`, `create-drive-file`, `download-drive-file`, `manage-gmail-label`, `modify-message-labels`, `update-gmail-send-as`, `insert-directory-user-alias`, `create-directory-group`, `insert-directory-group-member`, `patch-group-settings`, `create-contact`, `update-contact`, `delete-contact` |
+| **MEDIUM** | `create-event`, `modify-event`, `delete-event`, `share-drive-file`, `write-sheet`, `write-rich-text`, `write-rich-text-batch`, `create-doc`, `modify-doc-text`, `find-replace-doc`, `create-spreadsheet`, `format-sheet-range`, `add-sheet`, `copy-drive-file`, `create-drive-folder`, `create-drive-file`, `download-drive-file`, `export-doc-pdf`, `manage-gmail-label`, `modify-message-labels`, `update-gmail-send-as`, `insert-directory-user-alias`, `create-directory-group`, `insert-directory-group-member`, `patch-group-settings`, `create-contact`, `update-contact`, `delete-contact` |
 | **LOW** | `create-task`, `complete-task`, `update-task`, `delete-task`, `move-task`, comment commands |
 
 ### When to REFUSE (Default to READ ONLY):
@@ -145,7 +144,7 @@ domain-wide delegated service account even when listing works with user OAuth.
 | `get-doc-content` | READ | Get content | `--id`, `--suggestionsMode` |
 | `get-doc-markdown` | READ | Get as Markdown | `--id`, `--includeComments`, `--commentMode` (inline/appendix/none) |
 | `list-docs-in-folder` | READ | List Docs in folder | `--folder-id`, `--limit` |
-| `export-doc-pdf` | READ | Export to PDF | `--id`, `--filename`, `--folder-id` |
+| `export-doc-pdf` | WRITE | Export to PDF (saves a new PDF in Drive) | `--id`, `--filename`, `--folder-id` |
 | `create-doc` | WRITE | Create document | `--title`, `--content` |
 | `modify-doc-text` | WRITE | Insert/replace/delete | `--id`, `--operation` (insert/replace/delete), `--text`, `--index`, `--startIndex`, `--endIndex`, `--bold`, `--italic`, `--fontSize` |
 | `find-replace-doc` | WRITE | Find and replace | `--id`, `--find`, `--replace`, `--replaceAll` |

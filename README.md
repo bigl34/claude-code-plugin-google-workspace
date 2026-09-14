@@ -3,7 +3,7 @@
 
 Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts, Chat, Filters, Comments)
 
-![Version](https://img.shields.io/badge/version-1.12.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.12.1-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -47,7 +47,7 @@ Business Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks, Contacts
 - **get-doc-content** — READ
 - **get-doc-markdown** — READ
 - **list-docs-in-folder** — READ
-- **export-doc-pdf** — READ
+- **export-doc-pdf** — WRITE
 - **create-doc** — WRITE
 - **modify-doc-text** — WRITE
 - **find-replace-doc** — WRITE
@@ -203,16 +203,16 @@ npm --prefix scripts run cli -- search-gmail
 
 ### Docs
 
-| Command               | Type  | Description           | Key Options                                                                                                                          |
-| --------------------- | ----- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `search-docs`         | READ  | Search documents      | `--query`                                                                                                                            |
-| `get-doc-content`     | READ  | Get content           | `--id`, `--suggestionsMode`                                                                                                          |
-| `get-doc-markdown`    | READ  | Get as Markdown       | `--id`, `--includeComments`, `--commentMode` (inline/appendix/none)                                                                  |
-| `list-docs-in-folder` | READ  | List Docs in folder   | `--folder-id`, `--limit`                                                                                                             |
-| `export-doc-pdf`      | READ  | Export to PDF         | `--id`, `--filename`, `--folder-id`                                                                                                  |
-| `create-doc`          | WRITE | Create document       | `--title`, `--content`                                                                                                               |
-| `modify-doc-text`     | WRITE | Insert/replace/delete | `--id`, `--operation` (insert/replace/delete), `--text`, `--index`, `--startIndex`, `--endIndex`, `--bold`, `--italic`, `--fontSize` |
-| `find-replace-doc`    | WRITE | Find and replace      | `--id`, `--find`, `--replace`, `--replaceAll`                                                                                        |
+| Command               | Type  | Description                              | Key Options                                                                                                                          |
+| --------------------- | ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `search-docs`         | READ  | Search documents                         | `--query`                                                                                                                            |
+| `get-doc-content`     | READ  | Get content                              | `--id`, `--suggestionsMode`                                                                                                          |
+| `get-doc-markdown`    | READ  | Get as Markdown                          | `--id`, `--includeComments`, `--commentMode` (inline/appendix/none)                                                                  |
+| `list-docs-in-folder` | READ  | List Docs in folder                      | `--folder-id`, `--limit`                                                                                                             |
+| `export-doc-pdf`      | WRITE | Export to PDF (saves a new PDF in Drive) | `--id`, `--filename`, `--folder-id`                                                                                                  |
+| `create-doc`          | WRITE | Create document                          | `--title`, `--content`                                                                                                               |
+| `modify-doc-text`     | WRITE | Insert/replace/delete                    | `--id`, `--operation` (insert/replace/delete), `--text`, `--index`, `--startIndex`, `--endIndex`, `--bold`, `--italic`, `--fontSize` |
+| `find-replace-doc`    | WRITE | Find and replace                         | `--id`, `--find`, `--replace`, `--replaceAll`                                                                                        |
 
 ### Sheets
 
